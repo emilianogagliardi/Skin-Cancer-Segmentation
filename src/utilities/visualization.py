@@ -105,7 +105,6 @@ def plot_metrics(training_losses, validation_losses, test_metrics, experiment_fo
         plot_path = os.path.join(experiment_folder, f"{metric_name}.png")
         plt.savefig(plot_path)
         plt.close()
-        print(f"Saved plot to {plot_path}")
 
     plot_metric("TrainingLoss", training_losses)
     plot_metric("ValidationLoss", validation_losses)

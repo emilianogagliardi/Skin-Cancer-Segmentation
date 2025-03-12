@@ -7,6 +7,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 import os
 import datetime
+import argparse
+from tqdm import tqdm
 
 from models import UNetResNet34
 from dataset import get_train_val_test_loaders
@@ -24,8 +26,8 @@ class TrainingConfig:
     random_seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
-    num_epochs: int = 5
-    save_every_n_epochs: int = 2 
+    num_epochs: int = 50
+    save_every_n_epochs: int = 5
     batch_size: int = 8
     loss_type: Metrics = Metrics.JaccardDice
     # This metric is used for model selection and training scheduling
@@ -89,10 +91,12 @@ def train_one_epoch(
     Returns:
         dict[int, float]: Dictionary mapping number of seen samples to loss.
         int: Total number of seen samples after this epoch.
+        float: Average training loss for this epoch.
     """
     model.train()
     n_seen_samples = 0
     training_losses: dict[int, float] = {}  # Number of seen samples -> loss
+    
     for batch in train_loader:
         images, masks = batch["image"].to(config.device), batch["mask"].to(
             config.device
@@ -108,11 +112,9 @@ def train_one_epoch(
         n_seen_samples += config.batch_size
         training_losses[init_n_seen_samples + n_seen_samples] = loss.item()
 
-        print(
-            f"Epoch {epoch}, Seen {n_seen_samples} samples, Training Loss: {loss.item():.4f}"
-        )
-
-    return training_losses, n_seen_samples
+    avg_loss = sum(training_losses.values()) / len(training_losses) if training_losses else 0
+    
+    return training_losses, n_seen_samples, avg_loss
 
 
 @torch.no_grad()
@@ -121,7 +123,6 @@ def evaluate_model(
     loader: DataLoader,
     metric_function: torch.nn.Module,
     config: TrainingConfig,
-    metric_name: str,
 ):
     """
     Evaluate the model on a dataset using the specified metric.
@@ -131,13 +132,13 @@ def evaluate_model(
         loader (DataLoader): DataLoader for the evaluation data.
         metric_function (torch.nn.Module): The metric function to evaluate the model.
         config (TrainingConfig): Configuration for evaluation.
-        metric_name (str): Name of the metric being evaluated.
 
     Returns:
         float: The average metric value across all batches.
     """
     model.eval()
     metric_values = []
+    
     for batch in loader:
         images, masks = batch["image"].to(config.device), batch["mask"].to(
             config.device
@@ -147,7 +148,6 @@ def evaluate_model(
         metric_values.append(metric_value.item())
 
     average_metric = sum(metric_values) / len(metric_values)
-    print(f"Average {metric_name}: {average_metric:.4f}")
     return average_metric
 
 
@@ -233,11 +233,13 @@ def train(
 
     # Training loop
     n_seen_samples = 0
-    for epoch in range(config.num_epochs):
-        print(f"\n{'='*20} Epoch {epoch+1}/{config.num_epochs} {'='*20}")
-
+    
+    # Create a single progress bar for all epochs
+    epochs_pbar = tqdm(range(config.num_epochs), desc="Training Progress")
+    
+    for epoch in epochs_pbar:
         # Train epoch
-        new_training_losses, new_n_seen_samples = train_one_epoch(
+        new_training_losses, new_n_seen_samples, avg_train_loss = train_one_epoch(
             model, optimizer, train_loss_fn, train_loader, config, n_seen_samples, epoch
         )
         n_seen_samples += new_n_seen_samples
@@ -249,21 +251,29 @@ def train(
             validation_loader,
             validation_loss_fn,
             config,
-            f"Validation {config.validation_metric.value}",
         )
         validation_losses[n_seen_samples] = validation_loss
         scheduler.step(validation_loss)
 
-        # Track other validation metrics
+        # Collect other validation metrics
+        other_metrics_values = {}
         for metric in config.other_validation_metrics:
             other_validation_metric = evaluate_model(
                 model,
                 validation_loader,
                 other_validation_metrics_fns[metric],
                 config,
-                f"Validation {metric.value}",
             )
             other_validation_metrics[metric][n_seen_samples] = other_validation_metric
+            other_metrics_values[metric.value] = f"{other_validation_metric:.4f}"
+
+        # Log metrics
+        metrics_str = f"train_loss: {avg_train_loss:.4f}, val_loss: {validation_loss:.4f}"
+        metrics_log = f"Epoch {epoch+1}/{config.num_epochs} - {metrics_str}"
+        for metric_name, metric_value in other_metrics_values.items():
+            metrics_str += f", {metric_name}: {metric_value}"
+            metrics_log += f", {metric_name}: {metric_value}"
+        epochs_pbar.set_postfix_str(metrics_str)
 
         # Save periodic checkpoint
         if (epoch + 1) % config.save_every_n_epochs == 0:
@@ -271,7 +281,6 @@ def train(
             os.makedirs(checkpoint_dir, exist_ok=True)
             checkpoint_path = os.path.join(checkpoint_dir, "model.pt")
             save_checkpoint(model, checkpoint_path, validation_loader)
-            print(f"Saved periodic checkpoint to {checkpoint_dir}")
 
         # Save best model based on validation metric
         if validation_loss < best_validation_metric:
@@ -280,13 +289,42 @@ def train(
             os.makedirs(best_model_dir, exist_ok=True)
             best_model_path = os.path.join(best_model_dir, "model.pt")
             save_checkpoint(model, best_model_path, validation_loader)
-            print(f"New best model saved with validation metric: {validation_loss:.4f}")
+
+        # Update metrics plot
+        plot_metrics(training_losses, validation_losses, other_validation_metrics, experiment_path)
 
     return training_losses, validation_losses, other_validation_metrics
 
 
 def main() -> None:
-    config = TrainingConfig()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Train skin cancer segmentation model")
+    parser.add_argument(
+        "--dataset", 
+        type=str, 
+        default="data/sample_dataset",
+        help="Path to the dataset folder"
+    )
+    parser.add_argument(
+        "--experiment_folder", 
+        type=str, 
+        default="experiments/experiment",
+        help="Path to the experiments folder. Timestamp will be added to the folder name."
+    )
+    parser.add_argument(
+        "--epochs", 
+        type=int, 
+        default=50,
+        help="Number of training epochs"
+    )
+    args = parser.parse_args()
+    
+    # Create config with command line arguments
+    config = TrainingConfig(
+        dataset_path=args.dataset,
+        experiment_folder=args.experiment_folder,
+        num_epochs=args.epochs
+    )
 
     # Generate unique experiment path with timestamp
     experiment_path = config.get_experiment_path()
@@ -304,11 +342,10 @@ def main() -> None:
     model = UNetResNet34.load_pretrained()
     model.to(config.device)
 
-    training_losses, validation_losses, other_validation_metrics = train(
+    train(
         model, train_loader, validation_loader, config, experiment_path
     )
 
-    plot_metrics(training_losses, validation_losses, other_validation_metrics, experiment_path)
 
 if __name__ == "__main__":
     main()
