@@ -92,12 +92,21 @@ def train_one_epoch(
         dict[int, float]: Dictionary mapping number of seen samples to loss.
         int: Total number of seen samples after this epoch.
         float: Average training loss for this epoch.
+        float: Last batch loss value.
     """
     model.train()
     n_seen_samples = 0
     training_losses: dict[int, float] = {}  # Number of seen samples -> loss
+    last_batch_loss = 0.0
     
-    for batch in train_loader:
+    # Create a progress bar for batches within this epoch
+    batch_pbar = tqdm(
+        train_loader, 
+        desc=f"Epoch {epoch+1}/{config.num_epochs}", 
+        leave=True  # Keep the progress bar visible after completion
+    )
+    
+    for batch in batch_pbar:
         images, masks = batch["image"].to(config.device), batch["mask"].to(
             config.device
         )
@@ -110,11 +119,16 @@ def train_one_epoch(
         optimizer.step()
 
         n_seen_samples += config.batch_size
-        training_losses[init_n_seen_samples + n_seen_samples] = loss.item()
+        current_loss = loss.item()
+        last_batch_loss = current_loss  # Store the last batch loss
+        training_losses[init_n_seen_samples + n_seen_samples] = current_loss
+        
+        # Update batch progress bar with current loss
+        batch_pbar.set_postfix(loss=f"{current_loss:.4f}")
 
     avg_loss = sum(training_losses.values()) / len(training_losses) if training_losses else 0
     
-    return training_losses, n_seen_samples, avg_loss
+    return training_losses, n_seen_samples, avg_loss, last_batch_loss
 
 
 @torch.no_grad()
@@ -234,12 +248,12 @@ def train(
     # Training loop
     n_seen_samples = 0
     
-    # Create a single progress bar for all epochs
-    epochs_pbar = tqdm(range(config.num_epochs), desc="Training Progress")
-    
-    for epoch in epochs_pbar:
+    # No top-level progress bar, just iterate through epochs
+    for epoch in range(config.num_epochs):
+        print(f"\nStarting Epoch {epoch+1}/{config.num_epochs}")
+        
         # Train epoch
-        new_training_losses, new_n_seen_samples, avg_train_loss = train_one_epoch(
+        new_training_losses, new_n_seen_samples, avg_train_loss, last_batch_loss = train_one_epoch(
             model, optimizer, train_loss_fn, train_loader, config, n_seen_samples, epoch
         )
         n_seen_samples += new_n_seen_samples
@@ -267,13 +281,11 @@ def train(
             other_validation_metrics[metric][n_seen_samples] = other_validation_metric
             other_metrics_values[metric.value] = f"{other_validation_metric:.4f}"
 
-        # Log metrics
-        metrics_str = f"train_loss: {avg_train_loss:.4f}, val_loss: {validation_loss:.4f}"
-        metrics_log = f"Epoch {epoch+1}/{config.num_epochs} - {metrics_str}"
+        # Print metrics after epoch completes
+        print(f"Epoch {epoch+1}/{config.num_epochs} completed - avg_train_loss: {avg_train_loss:.4f}, val_loss: {validation_loss:.4f}", end="")
         for metric_name, metric_value in other_metrics_values.items():
-            metrics_str += f", {metric_name}: {metric_value}"
-            metrics_log += f", {metric_name}: {metric_value}"
-        epochs_pbar.set_postfix_str(metrics_str)
+            print(f", {metric_name}: {metric_value}", end="")
+        print()  # New line after metrics
 
         # Save periodic checkpoint
         if (epoch + 1) % config.save_every_n_epochs == 0:
