@@ -317,13 +317,20 @@ def main() -> None:
         default=50,
         help="Number of training epochs"
     )
+    parser.add_argument(
+        "--batch_size", 
+        type=int, 
+        default=8,
+        help="Batch size for training and validation"
+    )
     args = parser.parse_args()
     
     # Create config with command line arguments
     config = TrainingConfig(
         dataset_path=args.dataset,
         experiment_folder=args.experiment_folder,
-        num_epochs=args.epochs
+        num_epochs=args.epochs,
+        batch_size=args.batch_size
     )
 
     # Generate unique experiment path with timestamp
