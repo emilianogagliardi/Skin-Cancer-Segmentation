@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import argparse
+import torch
 from src.dataset import get_data_loader
+from src.models import UNetResNet34
 
 
 def print_dataset_info(dataloader):
@@ -26,18 +28,22 @@ def print_dataset_info(dataloader):
     print("\nStarting visualization...\n")
 
 
-def show_batch(batch, num_samples=4):
+def show_batch(batch, predictions=None, num_samples=4):
     """
-    Display a batch of images and their corresponding masks
+    Display a batch of images, their corresponding masks, and model predictions if available
 
     Args:
         batch: Dictionary containing 'image' and 'mask' tensors
+        predictions: Model predictions (optional)
         num_samples: Number of samples to display
     """
     images = batch["image"][:num_samples]
     masks = batch["mask"][:num_samples]
 
-    fig, axes = plt.subplots(2, num_samples, figsize=(3 * num_samples, 6))
+    # Determine number of rows based on whether predictions are available
+    num_rows = 3 if predictions is not None else 2
+    
+    fig, axes = plt.subplots(num_rows, num_samples, figsize=(3 * num_samples, 3 * num_rows))
 
     for idx in range(num_samples):
         # Convert tensor to numpy and transpose from (C,H,W) to (H,W,C)
@@ -57,6 +63,13 @@ def show_batch(batch, num_samples=4):
         axes[1, idx].axis("off")
         axes[1, idx].set_title(f"Ground Truth {idx+1}")
 
+        # Plot prediction if available
+        if predictions is not None:
+            pred = predictions[idx].numpy().squeeze()
+            axes[2, idx].imshow(pred, cmap="gray")
+            axes[2, idx].axis("off")
+            axes[2, idx].set_title(f"Prediction {idx+1}")
+
     plt.tight_layout()
     return fig
 
@@ -70,6 +83,9 @@ def main():
     parser.add_argument(
         "--num_samples", type=int, default=4, help="Number of samples to visualize"
     )
+    parser.add_argument(
+        "--model_path", type=str, default=None, help="Path to model snapshot for prediction visualization"
+    )
     args = parser.parse_args()
 
     # Fixed value for batch size
@@ -81,12 +97,34 @@ def main():
     # Print dataset information
     print_dataset_info(dataloader)
 
+    # Load model if path is provided
+    model = None
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.model_path:
+        print(f"\nLoading model from {args.model_path}")
+        try:
+            model = UNetResNet34.load_from_checkpoint(args.model_path, map_location=device)
+            model.eval()
+            print("Model loaded successfully")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            model = None
+
     # Interactive visualization
     plt.ion()  # Turn on interactive mode
 
     for batch_idx, batch in enumerate(dataloader):
+        # Get predictions if model is available
+        predictions = None
+        if model:
+            with torch.no_grad():
+                # Move images to the same device as the model
+                images = batch["image"].to(device)
+                # Get predictions
+                predictions = torch.sigmoid(model(images)).cpu()
+
         # Show the batch
-        fig = show_batch(batch, num_samples=args.num_samples)
+        fig = show_batch(batch, predictions, num_samples=args.num_samples)
 
         # Wait for key press
         key = plt.waitforbuttonpress()
